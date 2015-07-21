@@ -54,7 +54,7 @@ char out0[7] = {'s','y','n','0','_','0','\0'};
 char vect[6] = {'v','e','c','t','0','\0'};
 int out_update = 48;
 int checker = 0;
-
+int running_threads = 0;
 void InitUnigramTable() {
   int a, i;
   double train_words_pow = 0;
@@ -364,30 +364,24 @@ void InitNet() {
   }
   CreateBinaryTree();
 }
-//function that saves syn0 and syn1 that gets executed by a new thread every fixed amount of time.
+//function that saves syn0 and syn1 that gets executed by the main thread every fixed amount of time.
 //it also saves the binary represenatation of the word vectors which is used by the accuracy test
 //this is how we checkpoint the learning
-void *ReportSyn(void *ptr){
-  //save syn1 and syn0.
+void Report(){
+  //save syn1 and syn0. 
   checker = 1;
   FILE *syn1_file;
   FILE *syn0_file;
   FILE *fo;
-
   syn1_file = fopen(out1, "wb");
   syn0_file = fopen(out0, "wb");
 
-  
-  int i =0,a,b;
-  for (i=0; i<layer1_size*vocab_size; i++){
-    fprintf(syn1_file,"%f",syn1[i]);
-    fprintf(syn0_file,"%f",syn0[i]);    
-    fprintf(syn1_file,"%s"," ");
-    fprintf(syn0_file,"%s"," ");    
-  }
-  fclose(syn1_file);
+  fwrite(syn0,sizeof(real)*layer1_size*vocab_size,1,syn0_file);
   fclose(syn0_file);
 
+  fwrite(syn1,sizeof(real)*layer1_size*vocab_size,1,syn1_file);
+  fclose(syn1_file);
+  long long a,b;
   fo = fopen(vect, "wb");
   // Save the word vectors
   fprintf(fo, "%lld %lld\n", vocab_size, layer1_size);
@@ -398,7 +392,6 @@ void *ReportSyn(void *ptr){
     fprintf(fo, "\n");
   }
   fclose(fo);
-
   out_update++;
   out1[5]=out_update;
   out0[5]=out_update;
@@ -421,34 +414,20 @@ void *TrainModelThread(void *id) {
   long long l1, l2, c, target, label, local_iter = iter;
   unsigned long long next_random = (long long)id;
   real f, g;
-  real error = 0;
   clock_t now;
   real *neu1 = (real *)calloc(layer1_size, sizeof(real));
   real *neu1e = (real *)calloc(layer1_size, sizeof(real));
-
-  pthread_t *printer = (pthread_t *)malloc(1*sizeof(pthread_t));//new thread that will save the network
- 
-
-  double start, end; //wall time variables for checkpointing
-  start = get_wall_time();
-
   FILE *fi = fopen(train_file, "rb");
   fseek(fi, file_size / (long long)num_threads * (long long)id, SEEK_SET);
   while (1) {
     if (word_count - last_word_count > 10000) {
       word_count_actual += word_count - last_word_count;
       last_word_count = word_count;
-      end = get_wall_time();
-      if((int)round(end - start) % 18000 == 0  && id == NULL && checker == 0){ //every 18000 seconds or 5 hours syn1 and syn0 are saved
-        pthread_create(&printer[0],NULL,ReportSyn,(void *)0);
-      }
-
       if ((debug_mode > 1)) {
         now=clock();
         printf("%cAlpha: %f  Progress: %.2f%%  Words/thread/sec: %.2fk  ", 13, alpha,
          word_count_actual / (real)(iter * train_words + 1) * 100,
          word_count_actual / ((real)(now - start + 1) / (real)CLOCKS_PER_SEC * 1000));
-        printf("%d",(int)round(end - start)); //printing seconds elapsed since beggining of training
         fflush(stdout);
       }
       alpha = starting_alpha * (1 - word_count_actual / (real)(iter * train_words + 1));
@@ -508,16 +487,9 @@ void *TrainModelThread(void *id) {
           l2 = vocab[word].point[d] * layer1_size;
           // Propagate hidden -> output
           for (c = 0; c < layer1_size; c++) f += neu1[c] * syn1[c + l2];
-          if (f <= -MAX_EXP){
-
-            continue;
-         }
-          else if (f >= MAX_EXP){
-
-            continue;
-         }
+          if (f <= -MAX_EXP) continue;
+          else if (f >= MAX_EXP) continue;
           else f = expTable[(int)((f + MAX_EXP) * (EXP_TABLE_SIZE / MAX_EXP / 2))];
-
           // 'g' is the gradient multiplied by the learning rate
           g = (1 - vocab[word].code[d] - f) * alpha;
           // Propagate errors output -> hidden
@@ -612,10 +584,10 @@ void *TrainModelThread(void *id) {
       continue;
     }
   }
-
   fclose(fi);
   free(neu1);
   free(neu1e);
+  running_threads--;
   pthread_exit(NULL);
 }
 //function that is called in the end of TrainModel which is used to write the struct vocab_word *vocab to file
@@ -666,8 +638,22 @@ void TrainModel() {
   InitNet();
   if (negative > 0) InitUnigramTable();
   start = clock();
-
+  
+  double begin,end;
+  double time1 = 0;
+  begin = get_wall_time();
+  
   for (a = 0; a < num_threads; a++) pthread_create(&pt[a], NULL, TrainModelThread, (void *)a);
+  //checkpointing
+  while(running_threads>0){
+    end = get_wall_time();
+    time1 = end - begin;
+    if((int)round(time1) % 18000 == 0 && checker == 0){
+      printf("%s %d %s\n","Saving the network at", (int)round(time1), "seconds"); 
+      Report();
+    }
+  }
+ 
   for (a = 0; a < num_threads; a++) pthread_join(pt[a], NULL);
 
   fo = fopen(output_file, "wb");
@@ -726,19 +712,16 @@ void TrainModel() {
     free(cl);
   }
 
-//save syn1 and syn0
-FILE *syn1_file = fopen("syn1_final", "wb");
-FILE *syn0_file = fopen("syn0_final", "wb");
-
-int i =0;
-for (i=0; i<layer1_size*vocab_size; i++){
-  fprintf(syn1_file,"%f",syn1[i]);
-  fprintf(syn0_file,"%f",syn0[i]);    
-  fprintf(syn1_file,"%s"," ");
-  fprintf(syn0_file,"%s"," ");    
-}
+//save syn1 and syn0, this time in binary
+  
+FILE *syn0_file = fopen("syn0", "w+");
+fwrite(syn0,sizeof(real)*layer1_size*vocab_size,1,syn0_file);
 fclose(syn0_file);
+
+FILE *syn1_file = fopen("syn1", "w+");
+fwrite(syn1,sizeof(real)*layer1_size*vocab_size,1,syn1_file);
 fclose(syn1_file);
+int u = 0;
 
 //Save *vocab to file 
 int x = 0;
@@ -753,8 +736,8 @@ int ArgPos(char *str, int argc, char **argv) {
   for (a = 1; a < argc; a++) { // SEA added braces
     if (!strcmp(str, argv[a])) {
       if (a == argc - 1) {
-	printf("Argument missing for %s\n", str);
-	exit(1);
+  	printf("Argument missing for %s\n", str);
+  	exit(1);
       }
       return a;
     }
@@ -836,6 +819,7 @@ int main(int argc, char **argv) {
   if ((i = ArgPos((char *)"-min-count", argc, argv)) > 0) min_count = atoi(argv[i + 1]); else ArgFail();
   if ((i = ArgPos((char *)"-classes", argc, argv)) > 0) classes = atoi(argv[i + 1]); else ArgFail();
 
+  running_threads = num_threads;
   vocab = (struct vocab_word *)calloc(vocab_max_size, sizeof(struct vocab_word));
   vocab_hash = (int *)calloc(vocab_hash_size, sizeof(int));
   expTable = (real *)malloc((EXP_TABLE_SIZE + 1) * sizeof(real));
