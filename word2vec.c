@@ -142,56 +142,6 @@ int AddWordToVocab(char *word) {
   return vocab_size - 1;
 }
 
-void read_syn0(){
-  FILE *file_input;
-  long i, ctr = 0;
-  file_input = fopen("syn0", "r");
-
-  if(NULL == file_input){
-    printf("Unable to open the syn0 file\n");
-    exit(-1);
-  }
-  printf("Reading syn0\n");
-  while(!(feof(file_input)) && (ctr < layer1_size*vocab_size))
-  {
-    fscanf(file_input,"%f", &syn0[ctr]);
-    ctr++;
-    if(ctr % ((layer1_size*vocab_size)/100) == 0){
-
-        printf("%lld%%\r",ctr/((layer1_size*vocab_size)/100));
-        fflush(stdout);
-    }
-  }
-  printf("\n");
-  fclose(file_input);
-  return;
-}
-//read the syn1 array
-void read_syn1(){
-  FILE *file_input;
-  long i, ctr = 0;
-  file_input = fopen("syn1", "r");
-
-  if(NULL == file_input){
-    printf("Unable to open the syn1 file\n");
-    exit(-1);
-  }
-  printf("Reading syn1\n");
-  while(!(feof(file_input)) && (ctr < layer1_size*vocab_size))
-  {
-    fscanf(file_input,"%f", &syn1[ctr]);
-    ctr++;
-    if(ctr % ((layer1_size*vocab_size)/100) == 0){
-
-        printf("%lld%%\r",ctr/((layer1_size*vocab_size)/100));
-        fflush(stdout);
-    }
-  }
-  printf("\n");
-  fclose(file_input);
-  return;
-}
-
 // Used later for sorting by word counts
 int VocabCompare(const void *a, const void *b) {
     return ((struct vocab_word *)b)->cn - ((struct vocab_word *)a)->cn;
@@ -397,9 +347,10 @@ void InitNet() {
   a = posix_memalign((void **)&syn0, 128, (long long)vocab_size * layer1_size * sizeof(real));
   if (syn0 == NULL) {printf("Memory allocation failed\n"); exit(1);}
   if (hs) {
-      a = posix_memalign((void **)&syn1, 128, (long long)vocab_size * layer1_size * sizeof(real));
-      if (syn1 == NULL) {printf("Memory allocation failed\n"); exit(1);}
-      read_syn1();
+    a = posix_memalign((void **)&syn1, 128, (long long)vocab_size * layer1_size * sizeof(real));
+    if (syn1 == NULL) {printf("Memory allocation failed\n"); exit(1);}
+    for (a = 0; a < vocab_size; a++) for (b = 0; b < layer1_size; b++)
+     syn1[a * layer1_size + b] = 0;
   }
   if (negative>0) {
     a = posix_memalign((void **)&syn1neg, 128, (long long)vocab_size * layer1_size * sizeof(real));
@@ -407,20 +358,26 @@ void InitNet() {
     for (a = 0; a < vocab_size; a++) for (b = 0; b < layer1_size; b++)
      syn1neg[a * layer1_size + b] = 0;
   }
-  read_syn0();
-  
+  for (a = 0; a < vocab_size; a++) for (b = 0; b < layer1_size; b++) {
+    next_random = next_random * (unsigned long long)25214903917 + 11;
+    syn0[a * layer1_size + b] = (((next_random & 0xFFFF) / (real)65536) - 0.5) / layer1_size;
+  }
   CreateBinaryTree();
 }
 //function that saves syn0 and syn1 that gets executed by a new thread every fixed amount of time.
-//this is how we checkpoint our learning
+//it also saves the binary represenatation of the word vectors which is used by the accuracy test
+//this is how we checkpoint the learning
 void *ReportSyn(void *ptr){
   //save syn1 and syn0.
   checker = 1;
   FILE *syn1_file;
   FILE *syn0_file;
   FILE *fo;
+
   syn1_file = fopen(out1, "wb");
   syn0_file = fopen(out0, "wb");
+
+  
   int i =0,a,b;
   for (i=0; i<layer1_size*vocab_size; i++){
     fprintf(syn1_file,"%f",syn1[i]);
@@ -464,16 +421,14 @@ void *TrainModelThread(void *id) {
   long long l1, l2, c, target, label, local_iter = iter;
   unsigned long long next_random = (long long)id;
   real f, g;
-  real fbuffer[MAX_CODE_LENGTH]; //modified
-  real result = 1; //modified
   real error = 0;
-  int i,j,count=0;//modified 
   clock_t now;
   real *neu1 = (real *)calloc(layer1_size, sizeof(real));
   real *neu1e = (real *)calloc(layer1_size, sizeof(real));
 
-  pthread_t *printer = (pthread_t *)malloc(1*sizeof(pthread_t)); //new thread that will save the network
-  
+  pthread_t *printer = (pthread_t *)malloc(1*sizeof(pthread_t));//new thread that will save the network
+ 
+
   double start, end; //wall time variables for checkpointing
   start = get_wall_time();
 
@@ -484,7 +439,7 @@ void *TrainModelThread(void *id) {
       word_count_actual += word_count - last_word_count;
       last_word_count = word_count;
       end = get_wall_time();
-      if((int)round(end - start) % 18000 == 0  && (int)id == 0 && checker == 0){ //every 18000 seconds or 5 hours syn1 and syn0 are saved
+      if((int)round(end - start) % 18000 == 0  && id == NULL && checker == 0){ //every 18000 seconds or 5 hours syn1 and syn0 are saved
         pthread_create(&printer[0],NULL,ReportSyn,(void *)0);
       }
 
@@ -554,15 +509,15 @@ void *TrainModelThread(void *id) {
           // Propagate hidden -> output
           for (c = 0; c < layer1_size; c++) f += neu1[c] * syn1[c + l2];
           if (f <= -MAX_EXP){
-            fbuffer[d] = 1;
+
             continue;
          }
           else if (f >= MAX_EXP){
-            fbuffer[d] = 1;
+
             continue;
          }
           else f = expTable[(int)((f + MAX_EXP) * (EXP_TABLE_SIZE / MAX_EXP / 2))];
-          fbuffer[d] = f;
+
           // 'g' is the gradient multiplied by the learning rate
           g = (1 - vocab[word].code[d] - f) * alpha;
           // Propagate errors output -> hidden
@@ -667,8 +622,10 @@ void *TrainModelThread(void *id) {
 //uncomment lines to keep track of pointer as word structures are being written
 void WriteWordToFile(struct vocab_word curr_word,FILE* data){
   int i = 0;
+  char SPACE = ' ';
   long long length = strlen(curr_word.word)+1;
-  fwrite(curr_word.word,sizeof(char)*MAX_STRING,1,data);  
+  fwrite(curr_word.word,sizeof(char),length,data);   // SEA use length, not MAX_STRING
+  while (length <  MAX_STRING) { fwrite(&SPACE,sizeof(char),1,data); length++; }
   long offset = ftell(data);
 //  printf("%s","Write string stream");
 //  printf("%ld\n",offset);
@@ -769,6 +726,19 @@ void TrainModel() {
     free(cl);
   }
 
+//save syn1 and syn0
+FILE *syn1_file = fopen("syn1_final", "wb");
+FILE *syn0_file = fopen("syn0_final", "wb");
+
+int i =0;
+for (i=0; i<layer1_size*vocab_size; i++){
+  fprintf(syn1_file,"%f",syn1[i]);
+  fprintf(syn0_file,"%f",syn0[i]);    
+  fprintf(syn1_file,"%s"," ");
+  fprintf(syn0_file,"%s"," ");    
+}
+fclose(syn0_file);
+fclose(syn1_file);
 
 //Save *vocab to file 
 int x = 0;
@@ -780,14 +750,22 @@ fclose(fo);
 
 int ArgPos(char *str, int argc, char **argv) {
   int a;
-  for (a = 1; a < argc; a++) if (!strcmp(str, argv[a])) {
-    if (a == argc - 1) {
-      printf("Argument missing for %s\n", str);
-      exit(1);
+  for (a = 1; a < argc; a++) { // SEA added braces
+    if (!strcmp(str, argv[a])) {
+      if (a == argc - 1) {
+	printf("Argument missing for %s\n", str);
+	exit(1);
+      }
+      return a;
     }
-    return a;
   }
   return -1;
+}
+
+//SEA
+void ArgFail() {
+  fprintf(stderr,"Bad argument in cmd line.\n");
+  exit(-1);
 }
 
 int main(int argc, char **argv) {
@@ -838,24 +816,25 @@ int main(int argc, char **argv) {
   output_file[0] = 0;
   save_vocab_file[0] = 0;
   read_vocab_file[0] = 0;
-  if ((i = ArgPos((char *)"-size", argc, argv)) > 0) layer1_size = atoi(argv[i + 1]);
-  if ((i = ArgPos((char *)"-train", argc, argv)) > 0) strcpy(train_file, argv[i + 1]);
-  if ((i = ArgPos((char *)"-save-vocab", argc, argv)) > 0) strcpy(save_vocab_file, argv[i + 1]);
-  if ((i = ArgPos((char *)"-read-vocab", argc, argv)) > 0) strcpy(read_vocab_file, argv[i + 1]);
-  if ((i = ArgPos((char *)"-debug", argc, argv)) > 0) debug_mode = atoi(argv[i + 1]);
-  if ((i = ArgPos((char *)"-binary", argc, argv)) > 0) binary = atoi(argv[i + 1]);
-  if ((i = ArgPos((char *)"-cbow", argc, argv)) > 0) cbow = atoi(argv[i + 1]);
+  // SEA added ArgFail to force all args to be input
+  if ((i = ArgPos((char *)"-size", argc, argv)) > 0) layer1_size = atoi(argv[i + 1]); else ArgFail();
+  if ((i = ArgPos((char *)"-train", argc, argv)) > 0) strcpy(train_file, argv[i + 1]);  else ArgFail();
+  if ((i = ArgPos((char *)"-save-vocab", argc, argv)) > 0) strcpy(save_vocab_file, argv[i + 1]);  else ArgFail();
+  //if ((i = ArgPos((char *)"-read-vocab", argc, argv)) > 0) strcpy(read_vocab_file, argv[i + 1]);  else ArgFail(); // SEA deleted
+  if ((i = ArgPos((char *)"-debug", argc, argv)) > 0) debug_mode = atoi(argv[i + 1]); else ArgFail();
+  if ((i = ArgPos((char *)"-binary", argc, argv)) > 0) binary = atoi(argv[i + 1]); else ArgFail();
+  if ((i = ArgPos((char *)"-cbow", argc, argv)) > 0) cbow = atoi(argv[i + 1]); else ArgFail();
   if (cbow) alpha = 0.05;
-  if ((i = ArgPos((char *)"-alpha", argc, argv)) > 0) alpha = atof(argv[i + 1]);
-  if ((i = ArgPos((char *)"-output", argc, argv)) > 0) strcpy(output_file, argv[i + 1]);
-  if ((i = ArgPos((char *)"-window", argc, argv)) > 0) window = atoi(argv[i + 1]);
-  if ((i = ArgPos((char *)"-sample", argc, argv)) > 0) sample = atof(argv[i + 1]);
-  if ((i = ArgPos((char *)"-hs", argc, argv)) > 0) hs = atoi(argv[i + 1]);
-  if ((i = ArgPos((char *)"-negative", argc, argv)) > 0) negative = atoi(argv[i + 1]);
-  if ((i = ArgPos((char *)"-threads", argc, argv)) > 0) num_threads = atoi(argv[i + 1]);
-  if ((i = ArgPos((char *)"-iter", argc, argv)) > 0) iter = atoi(argv[i + 1]);
-  if ((i = ArgPos((char *)"-min-count", argc, argv)) > 0) min_count = atoi(argv[i + 1]);
-  if ((i = ArgPos((char *)"-classes", argc, argv)) > 0) classes = atoi(argv[i + 1]);
+  if ((i = ArgPos((char *)"-alpha", argc, argv)) > 0) alpha = atof(argv[i + 1]); else ArgFail();
+  if ((i = ArgPos((char *)"-output", argc, argv)) > 0) strcpy(output_file, argv[i + 1]); else ArgFail();
+  if ((i = ArgPos((char *)"-window", argc, argv)) > 0) window = atoi(argv[i + 1]); else ArgFail();
+  if ((i = ArgPos((char *)"-sample", argc, argv)) > 0) sample = atof(argv[i + 1]); else ArgFail();
+  if ((i = ArgPos((char *)"-hs", argc, argv)) > 0) hs = atoi(argv[i + 1]); else ArgFail();
+  if ((i = ArgPos((char *)"-negative", argc, argv)) > 0) negative = atoi(argv[i + 1]); else ArgFail();
+  if ((i = ArgPos((char *)"-threads", argc, argv)) > 0) num_threads = atoi(argv[i + 1]); else ArgFail();
+  if ((i = ArgPos((char *)"-iter", argc, argv)) > 0) iter = atoi(argv[i + 1]);  else ArgFail();
+  if ((i = ArgPos((char *)"-min-count", argc, argv)) > 0) min_count = atoi(argv[i + 1]); else ArgFail();
+  if ((i = ArgPos((char *)"-classes", argc, argv)) > 0) classes = atoi(argv[i + 1]); else ArgFail();
 
   vocab = (struct vocab_word *)calloc(vocab_max_size, sizeof(struct vocab_word));
   vocab_hash = (int *)calloc(vocab_hash_size, sizeof(int));
@@ -867,7 +846,7 @@ int main(int argc, char **argv) {
 
 
   TrainModel();
-  //write word_hash to file
+    //write word_hash to file
   FILE* hash_file = fopen("vocab_hash","wb");
   fwrite(vocab_hash,sizeof(int)*vocab_hash_size,1,hash_file);
   fclose(hash_file);

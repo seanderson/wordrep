@@ -7,8 +7,10 @@
 #define MAX_STRING 100
 #define EXP_TABLE_SIZE 1000
 #define MAX_EXP 6
-#define MAX_SENTENCE_LENGTH 1000
+#define MAX_SENTENCE_LENGTH 1000 // MAX = sentence-chars + newline + 0-byte
+
 #define MAX_CODE_LENGTH 40
+#define MAX_INDEX_BUFF_SIZE 10 // SEA
 
 const int vocab_hash_size = 30000000;
 long long vocab_max_size = 2000000; //this variable must be greater than the size of the vocabulary that is being read
@@ -54,7 +56,7 @@ void read_syn0(){
   {
     fscanf(file_input,"%f", &syn0[ctr]);
     ctr++;
-    if(ctr % ((layer1_size*vocab_size)/100) == 0){
+    if(vocab_size > 100000 && ctr % ((layer1_size*vocab_size)/100) == 0){
 
       printf("%lld%%\r",ctr/((layer1_size*vocab_size)/100));
       fflush(stdout);
@@ -79,7 +81,7 @@ void read_syn1(){
   {
     fscanf(file_input,"%f", &syn1[ctr]);
     ctr++;
-    if(ctr % ((layer1_size*vocab_size)/100) == 0){
+    if(vocab_size > 100000 && ctr % ((layer1_size*vocab_size)/100) == 0){
 
         printf("%lld%%\r",ctr/((layer1_size*vocab_size)/100));
         fflush(stdout);
@@ -169,6 +171,9 @@ SearchVocab(char *word) {
   return -1;
 }
 
+/*
+  Read next word from file.
+ */
 void ReadWord(char *word, FILE *fin) {
   int a = 0, ch;
   while (!feof(fin)) {
@@ -189,7 +194,10 @@ void ReadWord(char *word, FILE *fin) {
   }
   word[a] = 0;
 }
-//returns the word index by calling SearchVocab
+
+/*
+  Returns the word index by calling SearchVocab.
+*/
 int ReadWordIndex(FILE *fin) { //imported from word2vec
   char word[MAX_STRING];
   ReadWord(word, fin);
@@ -197,22 +205,39 @@ int ReadWordIndex(FILE *fin) { //imported from word2vec
   return SearchVocab(word);
 }
 
-int SentenceWordCount(FILE *fi){   
+/*
+  return wordcount of current line for file stream fi.
+  Assumes words are space-delimited and each line is newline delimited.
+*/
+int LineWordCount(char *sent) {
   int i=0;
-  int length_temp = 0; //length of current sentence delimited by /n  
-  char *buffer = (char*)calloc(MAX_SENTENCE_LENGTH,sizeof(char)); //storage for the sentence read from file
-  while(!feof(fi)){
-    buffer[i] = fgetc(fi);
-    if(buffer[i] == ' ') length_temp++;
-    if(buffer[i]=='\n') break;
+  int nwords = 0; //length of current line
+  char c;
+  int nchar = strlen(sent); // "word1 word2 ... \n\0"
+  int inword = 0; // true if cursor is in a word.
+
+  while (i < nchar) {
+    c = sent[i];
+    if ( c == '\n') break;
+    if (!inword && !isspace(c)) { // change of state from space to a word IS a new word
+      nwords++;
+      inword = 1;
+      //printf("word onset %c\n",c);
+    } 
+    else if (inword && isspace(c)) { // simply the end of current word
+      inword = 0;
+    }
     i++;
   }
-  length_temp++;
-  free(buffer);
-  return length_temp;
+  return nwords;
 }
 
-long long * FileToSen(int length, FILE* fi){ //converts a line in a file from text to an array of vocabulary indices, the input form for forward propagation 
+/*
+  Converts a line in a file from text to an array of vocabulary
+  indices, the input form for forward propagation.
+*/
+long long * FileToSen(int length, FILE* fi){ 
+
   long long *sen = (long long *) calloc(MAX_SENTENCE_LENGTH,sizeof(long long));
   long long word = 0,sentence_length = 0;
   if (sentence_length == 0) {
@@ -313,7 +338,7 @@ int ArgPos(char *str, int argc, char **argv) {
 void ReadIndexFromFile(FILE *indices){
   char ch;
   int i = 0;
-  while(1){
+  while (i < MAX_INDEX_BUFF_SIZE && !feof(indices) ){ // SEA added feof test
     ch = fgetc(indices);
     if(ch == '\n') break;
     else {
@@ -347,6 +372,28 @@ int Lines(FILE* fp){
   }
   return lines;
 }
+
+/*
+  Read exactly one line into line.
+  Return 1 if successful and -1 if EOF or error.
+  line is empty if no chars read.
+*/
+int readLine(FILE *fp, char *line) {
+
+    // Read one line and store for repeated use.  line will be "sentence chars\n\0"
+    line[0] = '\0';
+    if (fgets(line,MAX_SENTENCE_LENGTH,fp) == NULL || strlen(line) >= MAX_SENTENCE_LENGTH - 1) {
+      if (strlen(line) == 0) return(1); // normal exit on EOF
+      else {
+	fprintf(stderr,"ERROR: Line len %d is too long: %s",(int) strlen(line),line);
+	return (-1);
+      }
+    }
+    return (1);
+}
+
+
+
 int main(int argc, char **argv) {
   int i,j,k = 0;//counters
   if(argc == 1){  //printing instructions
@@ -369,7 +416,8 @@ int main(int argc, char **argv) {
   syn0 = (real *)calloc(layer1_size*vocab_size,sizeof(real)); 
   syn1 = (real *)calloc(layer1_size*vocab_size,sizeof(real)); 
   neu1 = (real *)calloc(layer1_size,sizeof(real));
-  index_buff = (char *)calloc(10,sizeof(char));
+
+  index_buff = (char *)calloc(MAX_INDEX_BUFF_SIZE,sizeof(char));
   // reading the network from file
   read_syn0();
   read_syn1();
@@ -394,33 +442,42 @@ int main(int argc, char **argv) {
   long long syno_ptr = 0, syno_ptr_temp = 0; //pointer used to go through the synonyms/replacements file 
 
 
-  FILE *fi = fopen("sentences","rb");
-  FILE *indices = fopen("indices","rb");
-  FILE *synonyms = fopen("synonyms","rb");
-  FILE *fo = fopen("processed sentences","wb");
+  FILE *sentfile = fopen("sentences","r");
+  FILE *indices = fopen("indices","r");
+  FILE *synfile = fopen("synonyms","r");
+  FILE *fo = fopen("wordprobs","w");
   int lines = 0;
-  lines = Lines(fi); // how many lines in the sentences file, which is used as the outer loop delimiter 
+  char line[MAX_SENTENCE_LENGTH]; // buffer to store current sentence
+  char synline[MAX_SENTENCE_LENGTH]; // buffer to store synonyms
+
+
+  lines = Lines(sentfile); // how many lines in the sentences file, which is used as the outer loop delimiter 
                      //(this can be done) since all the files "sentences", "synonyms" and "indices" have the same number of lines delimited by "\n"
-  rewind(fi);
+  rewind(sentfile);
+  rewind(synfile);
   
   for(i = 0; i<lines; i++){  //outer loop iterating through "sentences", "synonyms" and "indices" line by line
 
+    // read sentence
+    ptr = ftell(sentfile); // store beginning of line
+    if (readLine(sentfile,line) < 0) break;
+    length = LineWordCount(line); 
+    //printf("sent words %d\n",length);
 
-    ptr_temp = ftell(fi);
-    length = SentenceWordCount(fi); //length of current sentence
-    ptr=ftell(fi)-ptr_temp;
-    fseek(fi,-ptr,SEEK_CUR); //moving the pointer back to the beggining of the line
+    // read word replacements
+    syno_ptr = ftell(synfile); // store beginning of line
+    if (readLine(synfile,synline) < 0) break;
+    syno_length = LineWordCount(synline);
+    printf("synline %s\n",synline);
 
-    syno_ptr_temp = ftell(synonyms);
-    syno_length = SentenceWordCount(synonyms); //how many synonyms/replacements
-    syno_ptr = ftell(synonyms)-syno_ptr_temp;
-    fseek(synonyms,-syno_ptr,SEEK_CUR); //moving the pointer back to the beggining of the line
+    fseek(sentfile,ptr,SEEK_SET); // move the pointer back to the beginning of the line
+    sen = FileToSen(length,sentfile); //sen is an array of longs with the words of the sentence in a vocabulary index format
 
-    sen = FileToSen(length,fi); //sen is an array of longs with the words of the sentence in a vocabulary index format
-    synonym = FileToSen(syno_length,synonyms); //synonym is an array of longs with the replacements/synonyms from the "synonyms" file in vocabulary index format
+    fseek(synfile,syno_ptr,SEEK_SET);
+    synonym = FileToSen(syno_length,synfile); //synonym is an array of longs with the replacements/synonyms from the "synonyms" file in vocabulary index format
 
-    fseek(fi,1,SEEK_CUR);
-    fseek(synonyms,1,SEEK_CUR);
+    fseek(sentfile,1,SEEK_CUR); // added to get past newline
+    fseek(synfile,1,SEEK_CUR);
  
     ReadIndexFromFile(indices); //reads the index and puts it in the char array "index_buff"
     target_index = GetIndex(); //returns a numerical value from what is in the char array "index_buff"
@@ -428,17 +485,15 @@ int main(int argc, char **argv) {
       memcpy(sen_temp,sen,MAX_SENTENCE_LENGTH*sizeof(long long)); //copying the sentence into sen_temp where synonyms will be changed
       sen_temp[target_index] = synonym[k]; //replacing the target word with a synonym/replacement
       prob = ForwardPropagate(length,sen_temp); //doing forward propagation to get the probability
-      prob = prob * 100000; // multiplying the probabilty by 100000 or taking the negative log is done in this line
+      //prob = prob * 100000; // multiplying the probabilty by 100000 or taking the negative log is done in this line
 
-      fprintf(fo,"%s",vocab[synonym[k]].word); //writing down the replacement word and its probability 
-      fprintf(fo,"%s"," ");
-      fprintf(fo,"%Lf\n",prob);
+      fprintf(fo,"%s %Lf\n",vocab[synonym[k]].word,prob); // SEA the replacement word and its probability 
     }
   }
 
   fclose(fo);
-  fclose(fi);
-  fclose(synonyms);
+  fclose(sentfile);
+  fclose(synfile);
   fclose(indices);
 
   return 0;
