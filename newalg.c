@@ -52,17 +52,7 @@ void read_syn0(){
     exit(-1);
   }
   printf("Reading syn0\n");  
-  while(!(feof(file_input)) && (ctr < layer1_size*vocab_size))
-  {
-    fscanf(file_input,"%f", &syn0[ctr]);
-    ctr++;
-    if(vocab_size > 100000 && ctr % ((layer1_size*vocab_size)/100) == 0){
-
-      printf("%lld%%\r",ctr/((layer1_size*vocab_size)/100));
-      fflush(stdout);
-    }
-  }
-  printf("\n");
+  fread(syn0,sizeof(real),vocab_size*layer1_size,file_input);
   fclose(file_input);
   return;
 }
@@ -77,16 +67,8 @@ void read_syn1(){
     printf("Unable to open the syn1 file\n");
     exit(-1);
   }
-  while(!(feof(file_input)) && (ctr < layer1_size*vocab_size))
-  {
-    fscanf(file_input,"%f", &syn1[ctr]);
-    ctr++;
-    if(vocab_size > 100000 && ctr % ((layer1_size*vocab_size)/100) == 0){
+  fread(syn1,sizeof(real),vocab_size*layer1_size,file_input);
 
-        printf("%lld%%\r",ctr/((layer1_size*vocab_size)/100));
-        fflush(stdout);
-    }    
-  }
   printf("\n");
   fclose(file_input);
   return;
@@ -385,8 +367,8 @@ int readLine(FILE *fp, char *line) {
     if (fgets(line,MAX_SENTENCE_LENGTH,fp) == NULL || strlen(line) >= MAX_SENTENCE_LENGTH - 1) {
       if (strlen(line) == 0) return(1); // normal exit on EOF
       else {
-	fprintf(stderr,"ERROR: Line len %d is too long: %s",(int) strlen(line),line);
-	return (-1);
+  	fprintf(stderr,"ERROR: Line len %d is too long: %s",(int) strlen(line),line);
+  	return (-1);
       }
     }
     return (1);
